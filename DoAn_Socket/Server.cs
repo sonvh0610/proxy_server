@@ -22,6 +22,7 @@ namespace DoAn_Socket
         {
             this.port = port;
             this.listener = new TcpListener(IPAddress.Any, this.port);
+            // Set timeout of listener to reduce waste time
             listener.Server.ReceiveTimeout = 1000;
             listener.Server.SendTimeout = 1000;
         }

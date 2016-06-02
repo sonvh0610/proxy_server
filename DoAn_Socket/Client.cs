@@ -1,6 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -13,7 +17,6 @@ namespace DoAn_Socket
         private Socket client;
         Thread handler;
         private List<string> lBlacklist;
-        private string filename;
         private IOBlacklist io;
 
         public Client(Socket client)
@@ -37,86 +40,69 @@ namespace DoAn_Socket
 
         private void Handler()
         {
-            bool receiveRequest = true;
-            string EOL = "\r\n";
-
-            string requestPayload = "";
-            string requestTempLine = "";
-            List<string> requestLines = new List<string>();
-            byte[] requestBuffer = new byte[1];
-            byte[] responseBuffer = new byte[1];
-
-            requestLines.Clear();
+            // This will contain string from client send to, or server send back
+            // RequestBuffer use 10000 characters because we can read all client bytes from stream
+            byte[] RequestBuffer = new byte[10000];
+            byte[] ResponseBuffer = new byte[1];
 
             try
             {
                 // When a browser send request to Proxy Server
-                // Proxy Server receive it...
-                while (receiveRequest)
-                {
-                    this.client.Receive(requestBuffer);
-                    string fromByte = ASCIIEncoding.ASCII.GetString(requestBuffer);
-                    requestPayload += fromByte;
-                    requestTempLine += fromByte;
-
-                    if (requestTempLine.EndsWith(EOL))
-                    {
-                        requestLines.Add(requestTempLine.Trim());
-                        requestTempLine = "";
-                    }
-
-                    if (requestPayload.EndsWith(EOL + EOL))
-                    {
-                        receiveRequest = false;
-                    }
-                }
+                // Proxy Server receive it, then parse from byte array to string
+                // But we also cut out some '\0' characters at the end of RequestString to correct it
+                this.client.Receive(RequestBuffer);
+                string RequestString = System.Text.Encoding.Default.GetString(RequestBuffer);
+                RequestString = RequestString.Substring(0, RequestString.IndexOf('\0'));
 
                 // Parse string to get URL, host and path
-                string strUrl = requestLines[0].Split(' ')[1];
+                // HTTP packets always contain url string at the beginning of packet
+                // So we want to get the first line, and split by a space to get url
+                string FirstRequestLine = RequestString.Substring(0, RequestString.IndexOf("\r\n"));
+                string strUrl = FirstRequestLine.Split(' ')[1];
                 Uri uri = new Uri(strUrl);
-                string remoteHost = uri.Host;
+                string RemoteHost = uri.Host;
                 string requestFile = uri.PathAndQuery;
 
                 // We have a blacklist, which blocked websites to access
                 // This will check if URL has prefix www. or not
                 // For example: hcmus.edu.vn => www.hcmus.edu.vn (handle this)
-                string aliasHost = null;
+                string AliasHost = null;
                 string www = "www.";
-                if (remoteHost.IndexOf("www.") != -1) aliasHost = remoteHost.Substring(remoteHost.IndexOf(www) + www.Length);
-                else aliasHost = www + remoteHost;
+                if (RemoteHost.IndexOf("www.") != -1) AliasHost = RemoteHost.Substring(RemoteHost.IndexOf(www) + www.Length);
+                else AliasHost = www + RemoteHost;
 
-                var pos1 = lBlacklist.FindIndex(s => s.Equals(remoteHost));
-                var pos2 = lBlacklist.FindIndex(s => s.Equals(aliasHost));
+                // This is lambda expression of finding an item from array
+                // Full syntax of them is
+                // lBlacklist.FindIndex( (string s) => { s.Equals(host) } ); <= We've shortened this line
+                int pos1 = lBlacklist.FindIndex(s => s.Equals(RemoteHost));
+                int pos2 = lBlacklist.FindIndex(s => s.Equals(AliasHost));
                 
                 // Check if request is blocked
                 if (pos1 != -1 || pos2 != -1)
                 {
                     // Send 403 Forbidden header to client
                     String response = "HTTP/1.1 403 Forbidden\r\n\r\n";
-                    response += "<h1>403 Forbidden</h1><p>You don't have permission to access " + requestFile + " on this server.</p><hr/><i>Proxy Server Project - University of Science</i>";
-                    var byteArr = System.Text.Encoding.Default.GetBytes(response);
-                    this.client.Send(byteArr);
+                    response += "<h1>403 Forbidden</h1><p>You don't have permission to access " 
+                                + requestFile 
+                                + " on this server.</p><hr/><i>Proxy Server Project - University of Science</i>";
+                    this.client.Send(ASCIIEncoding.ASCII.GetBytes(response));
                 }
                 else
                 {
-                    requestPayload = "";
-                    foreach (string line in requestLines)
+                    // Create a connection from this proxy to browser
+                    // AddressFamily.InterNetwork: socket is using IPv4
+                    // SocketType.Stream: use stream to send data to client
+                    // ProtocolType.Tcp: work with TCP Protocol
+                    using (Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                     {
-                        requestPayload += line;
-                        requestPayload += EOL;
+                        server.Connect(RemoteHost, 80);
+                        server.Send(ASCIIEncoding.ASCII.GetBytes(RequestString));
+
+                        while (server.Receive(ResponseBuffer) != 0)
+                        {
+                            this.client.Send(ResponseBuffer);
+                        }
                     }
-
-                    Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                    server.Connect(remoteHost, 80);
-
-                    server.Send(ASCIIEncoding.ASCII.GetBytes(requestPayload));
-
-                    while (server.Receive(responseBuffer) != 0)
-                    {
-                        this.client.Send(responseBuffer);
-                    }
-                    server.Disconnect(false);
-                    server.Dispose();
                 }
 
                 this.client.Disconnect(false);
